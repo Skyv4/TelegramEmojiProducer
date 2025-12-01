@@ -90,7 +90,7 @@ def convert_to_webm_intermediate(input_path: Path, output_path: Path, max_durati
         print(f"Could not determine dimensions for {input_path.name}, falling back to 512x512 max.")
         width, height = 512, 512 # Fallback if cannot determine dimensions
 
-    telegram_max_dim = 512
+    telegram_max_dim = 100
     if max(width, height) <= telegram_max_dim:
         scaled_width, scaled_height = width, height
     elif width >= height:
