@@ -12,3 +12,6 @@ wheels/
 output
 archive
 input
+
+.env
+node_modules

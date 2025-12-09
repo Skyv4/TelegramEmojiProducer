@@ -1,0 +1,72 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e7]:
+      - generic [ref=e10]:
+        - img [ref=e12]
+        - generic [ref=e14]:
+          - heading "Telegram Sticker Converter" [level=1] [ref=e15]
+          - paragraph [ref=e16]: Transform media into perfect stickers
+    - main [ref=e17]:
+      - generic [ref=e18]:
+        - generic [ref=e19]:
+          - heading "Create Perfect Telegram Stickers" [level=2] [ref=e20]
+          - paragraph [ref=e21]: Convert GIFs and videos to Telegram-compliant WebM stickers with transparency, optimized size, and perfect quality.
+        - generic [ref=e22]:
+          - generic [ref=e23]:
+            - img [ref=e25]
+            - heading "Auto-Optimized" [level=3] [ref=e28]
+            - paragraph [ref=e29]: Automatically resized to 512px and under 64KB
+          - generic [ref=e30]:
+            - img [ref=e32]
+            - heading "Transparency Support" [level=3] [ref=e34]
+            - paragraph [ref=e35]: Preserves alpha channel for transparent backgrounds
+          - generic [ref=e36]:
+            - img [ref=e38]
+            - heading "Perfect Duration" [level=3] [ref=e42]
+            - paragraph [ref=e43]: Trimmed to 2.84 seconds for Telegram compliance
+        - generic [ref=e44]:
+          - generic [ref=e46]:
+            - img [ref=e48]
+            - generic [ref=e51]:
+              - heading "Drop your files here" [level=3] [ref=e52]
+              - paragraph [ref=e53]: or click to browse
+              - generic [ref=e54] [cursor=pointer]: Choose Files
+            - paragraph [ref=e55]: Supports GIF and video files (MP4, MOV, AVI, etc.)
+          - generic [ref=e56]:
+            - heading "Or convert from URL" [level=4] [ref=e57]
+            - textbox "Enter emoji URL (e.g., https://example.com/animated.gif)" [ref=e58]
+            - button "Convert URL to Sticker" [ref=e59]:
+              - img [ref=e60]
+              - text: Convert URL to Sticker
+        - generic [ref=e62]:
+          - heading "Telegram Sticker Requirements" [level=3] [ref=e63]
+          - generic [ref=e64]:
+            - generic [ref=e65]:
+              - img [ref=e66]
+              - generic [ref=e69]:
+                - paragraph [ref=e70]: Format
+                - paragraph [ref=e71]: WebM with VP9 codec and alpha channel
+            - generic [ref=e72]:
+              - img [ref=e73]
+              - generic [ref=e76]:
+                - paragraph [ref=e77]: Dimensions
+                - paragraph [ref=e78]: 512px on the longest side
+            - generic [ref=e79]:
+              - img [ref=e80]
+              - generic [ref=e83]:
+                - paragraph [ref=e84]: Duration
+                - paragraph [ref=e85]: Maximum 3 seconds (optimized to 2.84s)
+            - generic [ref=e86]:
+              - img [ref=e87]
+              - generic [ref=e90]:
+                - paragraph [ref=e91]: File Size
+                - paragraph [ref=e92]: Under 64KB for optimal performance
+    - contentinfo [ref=e93]:
+      - paragraph [ref=e95]: Built with ❤️ for Telegram sticker creators
+  - button "Open Next.js Dev Tools" [ref=e101] [cursor=pointer]:
+    - img [ref=e102]
+  - alert [ref=e107]
+```

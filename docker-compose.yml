@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/db.json:/app/db.json
+      - ./backend/archive:/app/archive
+      - ./backend/input:/app/input
+      - ./backend/output:/app/output
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python -m uvicorn telegramemojis.main:app --host 0.0.0.0 --port 8000 --reload
+  
+  frontend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000 # Connects to the backend service within Docker network
+    command: pnpm dev
