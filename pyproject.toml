@@ -8,3 +8,12 @@ dependencies = [
     "Pillow",
     "python-magic",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+pythonpath = "src"
