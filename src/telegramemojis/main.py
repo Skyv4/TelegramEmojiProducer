@@ -5,6 +5,11 @@ import subprocess
 from pathlib import Path
 import tempfile 
 import magic 
+try:
+    from .custom_encoder import encode_with_alpha_muxing
+except ImportError:
+    # Fallback for running script directly
+    from custom_encoder import encode_with_alpha_muxing
 
 # --- Setup and Utility Functions (Omitted for brevity, but assumed to be unchanged) ---
 
@@ -17,7 +22,6 @@ def setup_directories(base_path: Path):
         "output_static": base_path / "output" / "static",
         "archive_webm": base_path / "archive" / "webm", 
         "archive_static": base_path / "archive" / "static",
-        "archive_gif": base_path / "archive" / "gif", 
     }
 
     for path in dirs.values():
@@ -25,83 +29,103 @@ def setup_directories(base_path: Path):
     
     return dirs
 
-def check_ffmpeg_installed():
-    """Checks if ffmpeg and ffprobe are installed."""
-    for cmd in ["ffmpeg", "ffprobe"]:
-        if shutil.which(cmd) is None:
-            print(f"Error: {cmd} is not installed or not in PATH.")
-            print("Please install ffmpeg (which includes ffprobe) to use this script.")
-            return False
-    return True
+import av
+from PIL import Image
 
-def is_gif_or_video(file_path: Path) -> bool:
-    """Checks if a file is a GIF or a common video format using python-magic."""
+def get_video_info(file_path: Path):
+    """Gets duration, dimensions, and framerate using PyAV."""
     try:
-        mime = magic.Magic(mime=True)
-        file_type = mime.from_file(str(file_path))
-        return file_type.startswith("image/gif") or file_type.startswith("video/")
+        with av.open(str(file_path)) as container:
+            stream = container.streams.video[0]
+            # Duration in seconds
+            duration = float(stream.duration * stream.time_base) if stream.duration else 0.0
+            
+            # Framerate
+            # stream.average_rate is usually reliable
+            fps = float(stream.average_rate)
+            
+            width = stream.width
+            height = stream.height
+            
+            return duration, width, height, fps
     except Exception as e:
-        print(f"Error checking file type for {file_path}: {e}")
-        return False
+        print(f"Error inspecting {file_path}: {e}")
+        return 0.0, 512, 512, 30.0
 
-def is_gif(file_path: Path) -> bool:
-    """Checks if a file is specifically a GIF using python-magic."""
-    try:
-        mime = magic.Magic(mime=True)
-        file_type = mime.from_file(str(file_path))
-        return file_type.startswith("image/gif")
-    except Exception as e:
-        print(f"Error checking file type for {file_path}: {e}")
-        return False
-
-def get_video_duration(file_path: Path) -> float:
-    """Gets the duration of a video file using ffprobe."""
-    command = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(file_path)
-    ]
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        return float(result.stdout.strip())
-    except Exception as e:
-        print(f"Error getting duration for {file_path}: {e}")
-        return 0.0
-
-def convert_to_webm_intermediate(input_path: Path, output_path: Path, max_duration_sec: float = 2.84) -> Path:
+def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, max_duration_sec: float = 2.84) -> float:
     """
-    Converts any input (original video or PNG sequence) to an intermediate WebM,
-    trims to max_duration_sec, and rescales to Telegram sticker dimensions.
+    Extracts RGBA PNG frames using PIL (for GIFs) or PyAV (for other video formats),
+    trims to max_duration_sec, and rescales.
+    Returns the framerate.
     """
-    print(f"Converting {input_path.name} to intermediate WebM and trimming to {max_duration_sec} seconds...")
+    print(f"Extracting frames from {input_path.name}...")
+    
+    mime_type = magic.from_file(str(input_path), mime=True)
+    is_image_animation = mime_type in ['image/gif', 'image/webp']
 
-    # Set input parameters based on whether the input is a file or a PNG sequence pattern
-    if "%" in input_path.name: # Indicates a frame sequence pattern (e.g., frame%04d.png)
-        input_for_webm = str(input_path)
-        input_format_param = ["-i"]
-    else:
-        input_for_webm = str(input_path)
-        input_format_param = ["-i"]
+    if is_image_animation:
+        # Use PIL for robust GIF/WebP transparency handling
+        try:
+            with Image.open(input_path) as img:
+                # Handle resizing calculations based on first frame
+                width, height = img.size
+                
+                # Assume a standard-ish framerate if duration info is missing
+                # GIFs have variable frame delays
+                fps = 30.0 
+                if 'duration' in img.info:
+                    # PIL gives duration per frame in ms
+                    # Average it?
+                    pass
+                
+                # NOTE: For GIFs, we usually iterate all frames. Calculating simplified FPS from total duration is tricky.
+                # Let's try to get an average FPS or just default to 30 and rely on the number of frames we extract.
+                pass
+                
+                
+                # Recalculate dims
+                telegram_max_dim = 100
+                if max(width, height) <= telegram_max_dim:
+                    scaled_width, scaled_height = width, height
+                elif width >= height:
+                    scaled_width = telegram_max_dim
+                    scaled_height = int(height * (telegram_max_dim / width))
+                else:
+                    scaled_height = telegram_max_dim
+                    scaled_width = int(width * (telegram_max_dim / height))
+                
+                scaled_width = scaled_width if scaled_width % 2 == 0 else scaled_width - 1
+                scaled_height = scaled_height if scaled_height % 2 == 0 else scaled_height - 1
 
+                frame_count = 0
+                max_frames = int(max_duration_sec * fps) # limit frames
+                
+                for i in range(img.n_frames):
+                    if frame_count >= max_frames:
+                        break
+                        
+                    img.seek(i)
+                    frame = img.convert("RGBA")
+                    
+                     # Resize
+                    if (scaled_width, scaled_height) != frame.size:
+                        frame = frame.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+                    
+                    out_name = output_frames_dir / f"frame{frame_count:04d}.png"
+                    frame.save(out_name)
+                    frame_count += 1
+                    
+                print(f"Extracted {frame_count} frames from animated image using PIL to {output_frames_dir}")
+                return fps
 
-    # Get original dimensions to set initial scale and maintain aspect ratio
-    probe_dim_command = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "V:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=p=0:s=x",
-        str(input_path)
-    ]
-    try:
-        dim_result = subprocess.run(probe_dim_command, check=True, capture_output=True, text=True)
-        width, height = map(int, dim_result.stdout.strip().split('x'))
-    except Exception:
-        print(f"Could not determine dimensions for {input_path.name}, falling back to 100x100 max.")
-        width, height = 100, 100 # Fallback if cannot determine dimensions
+        except Exception as e:
+             print(f"Error extracting animated image with PIL: {e}. Falling back to PyAV...")
+             # Fallthrough to PyAV if PIL fails
 
+    # PyAV Path (Videos or fallback)
+    duration, width, height, fps = get_video_info(input_path)
+    
+    # Calculate new dimensions
     telegram_max_dim = 100 
     if max(width, height) <= telegram_max_dim:
         scaled_width, scaled_height = width, height
@@ -112,218 +136,226 @@ def convert_to_webm_intermediate(input_path: Path, output_path: Path, max_durati
         scaled_height = telegram_max_dim
         scaled_width = int(width * (telegram_max_dim / height))
     
-    # Ensure dimensions are even for ffmpeg compatibility
+    # Ensure even dimensions
     scaled_width = scaled_width if scaled_width % 2 == 0 else scaled_width - 1
     scaled_height = scaled_height if scaled_height % 2 == 0 else scaled_height - 1
+    
+    # Fallback FPS if detection failed or is weird
+    if fps <= 0 or fps > 120: fps = 30.0
 
-    command = [
-        "ffmpeg",
-    ] + input_format_param + [input_for_webm,
-        "-ss", "0",
-        "-t", str(max_duration_sec),
-        # format=rgba is critical here if input is a video, but it's redundant/harmless if input is already PNG sequence
-        # The key is converting to yuva420p for the final VP9 encode
-        "-vf", f"format=rgba,scale={scaled_width}:{scaled_height}:flags=lanczos,format=yuva420p", 
-        "-c:v", "libvpx-vp9", 
-        "-pix_fmt", "yuva420p", 
-        "-metadata:s:v:0", "alpha_mode=1", 
-        "-an", 
-        "-y", 
-        str(output_path),
-    ]
-    print(f"FFmpeg command in convert_to_webm_intermediate: {' '.join(command)}")
-    print(f"Input for WebM: {input_for_webm}")
+    frame_count = 0
+    max_frames = int(max_duration_sec * fps)
+    
     try:
-        subprocess.run(command, check=True, capture_output=True)
-        print(f"Successfully converted and trimmed to {output_path.name}")
-        return output_path
-    except subprocess.CalledProcessError as e:
-        print(f"Error converting/trimming {input_path.name}: {e}")
-        print(f"stdout: {e.stdout.decode()}")
-        print(f"stderr: {e.stderr.decode()}")
+        with av.open(str(input_path)) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO" 
+            
+            for frame in container.decode(stream):
+                if frame_count >= max_frames:
+                    break
+                    
+                # Convert to PIL Image
+                # layout="rgba" ensures we get alpha if present (e.g. gif)
+                img = frame.to_image().convert("RGBA")
+                
+                # Resize
+                if (scaled_width, scaled_height) != img.size:
+                    img = img.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+                
+                out_name = output_frames_dir / f"frame{frame_count:04d}.png"
+                img.save(out_name)
+                frame_count += 1
+                
+        print(f"Extracted {frame_count} frames to {output_frames_dir}")
+        return fps
+        
+    except Exception as e:
+        print(f"Error extracting frames from {input_path.name}: {e}")
         raise
 
 
-def optimize_webm_size(input_path: Path, output_path: Path, target_size_kb: int = 64) -> Path:
+
+
+def get_optimization_candidates(base_fps: float):
     """
-    Iteratively adjusts WebM quality to meet a target file size using ffmpeg.
-    (Omitted for brevity, assumed to be unchanged)
+    Generates a sorted list of encoding configurations (Scale, CRF, FPS Divisor).
+    Sorted by estimated quality (descending).
     """
-    print(f"Optimizing WebM size for {input_path.name} to target {target_size_kb}KB...")
+    # STRICT 100x100 Constraint usually applies for Emojis.
+    # Therefore we DISABLE scaling down resolution (Scale < 1.0) because it changes the dimensions from 100x100.
+    scales = [1.0] 
     
-    best_effort_size = os.path.getsize(input_path)
-    best_effort_path = input_path 
-
-    temp_output_base = output_path.parent / (output_path.stem + "_temp_opt")
-
-    # Iterate through CRF values (higher CRF = lower quality = smaller file)
-    for crf in range(25, 45, 5): 
-        current_temp_output = temp_output_base.with_suffix(f".crf{crf}.webm")
-        command = [
-            "ffmpeg",
-            "-i", str(input_path),
-            "-c:v", "libvpx-vp9",
-            "-crf", str(crf),
-            "-pix_fmt", "yuva420p",
-            "-metadata:s:v:0", "alpha_mode=1",
-            "-an",
-            "-loop", "0",
-            "-y",
-            str(current_temp_output),
-        ]
-        
-        try:
-            subprocess.run(command, check=True, capture_output=True)
-            current_file_size = os.path.getsize(current_temp_output)
-            print(f"Generated {current_temp_output.name} with size {current_file_size / 1024:.2f}KB (CRF={crf}).")
-
-            if current_file_size <= target_size_kb * 1024:
-                print(f"Successfully optimized {input_path.name} to {current_file_size / 1024:.2f}KB.")
-                shutil.move(current_temp_output, output_path)
-                return output_path
-            
-            if current_file_size < best_effort_size:
-                best_effort_size = current_file_size
-                best_effort_path = current_temp_output
-            else:
-                if current_temp_output.exists():
-                    current_temp_output.unlink()
-
-        except subprocess.CalledProcessError as e:
-            print(f"Error optimizing {input_path.name} with CRF={crf}: {e}")
-            if current_temp_output.exists():
-                current_temp_output.unlink()
-
-    # If target not met, try scaling down dimensions further 
-    if best_effort_size > target_size_kb * 1024 and best_effort_path.exists():
-        print(f"Target size not met with CRF. Trying additional scaling down...")
-        probe_dim_command = [
-            "ffprobe",
-            "-v", "error",
-            "-select_streams", "V:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x",
-            str(best_effort_path)
-        ]
-        try:
-            dim_result = subprocess.run(probe_dim_command, check=True, capture_output=True, text=True)
-            current_width, current_height = map(int, dim_result.stdout.strip().split('x'))
-        except Exception:
-            current_width, current_height = 512, 512 # Fallback
-        
-        for scale_percentage in range(90, 40, -10): 
-            new_width = int(current_width * scale_percentage / 100)
-            new_height = int(current_height * scale_percentage / 100)
-            new_width = max(1, new_width if new_width % 2 == 0 else new_width - 1)
-            new_height = max(1, new_height if new_height % 2 == 0 else new_height - 1)
-
-            if new_width == 0 or new_height == 0:
-                continue
-
-            current_temp_output = temp_output_base.with_suffix(f".scale{scale_percentage}.webm")
-            print(f"Trying with scale {scale_percentage}% ({new_width}x{new_height})...")
-            command = [
-                "ffmpeg",
-                "-i", str(input_path), 
-                "-vf", f"scale={new_width}:{new_height}:flags=lanczos,format=yuva420p",
-                "-c:v", "libvpx-vp9",
-                "-crf", "30", 
-                "-pix_fmt", "yuva420p",
-                "-metadata:s:v:0", "alpha_mode=1",
-
-                "-an",
-                "-loop", "0",
-                "-y",
-                str(current_temp_output),
-            ]
-            try:
-                subprocess.run(command, check=True, capture_output=True)
-                current_file_size = os.path.getsize(current_temp_output)
-                print(f"Generated {current_temp_output.name} with size {current_file_size / 1024:.2f}KB.")
-
-                if current_file_size <= target_size_kb * 1024:
-                    print(f"Successfully optimized {input_path.name} to {current_file_size / 1024:.2f}KB.")
-                    shutil.move(current_temp_output, output_path)
-                    if best_effort_path.exists() and best_effort_path != input_path: best_effort_path.unlink()
-                    return output_path
-                
-                if current_file_size < best_effort_size:
-                    best_effort_size = current_file_size
-                    best_effort_path = current_temp_output
-                else:
-                    if current_temp_output.exists():
-                        current_temp_output.unlink()
-
-            except subprocess.CalledProcessError as e:
-                print(f"Error optimizing {input_path.name} with scale={scale_percentage}%: {e}")
-                if current_temp_output.exists():
-                    current_temp_output.unlink()
+    # We expand the CRF range and FPS divisors to compensate for lack of scaling.
+    crfs = [30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50]
     
-    if best_effort_path.exists():
-        print(f"Could not meet target size for {input_path.name}. Best effort is {best_effort_size / 1024:.2f}KB.")
-        shutil.move(best_effort_path, output_path)
-        return output_path
-    
-    print(f"Failed to optimize {input_path.name}. Returning original file as best effort.")
-    return input_path
+    # FPS Divisors: 1.0 (Original), 1.5, 2.0, 3.0, 4.0
+    fps_divisors = [1.0]
+    if base_fps >= 20: fps_divisors.append(1.5)
+    if base_fps >= 30: fps_divisors.append(2.0)
+    if base_fps >= 40: fps_divisors.append(2.5)
+    if base_fps >= 50: fps_divisors.append(3.0) 
+    if base_fps >= 60: fps_divisors.append(4.0)
 
+    candidates = []
+    
+    for scale in scales:
+        for div in fps_divisors:
+            for crf in crfs:
+                # Heuristic Quality Score
+                score = (scale ** 1.8) * (1.0 / div) * ((60 - crf) ** 1.2)
+                candidates.append({
+                    "scale": scale,
+                    "crf": crf,
+                    "fps_div": div,
+                    "score": score
+                })
+    
+    # Sort by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates
 
 def convert_to_telegram_sticker(input_path: Path, output_dir: Path) -> Path:
     """
     Converts a GIF/Video to Telegram sticker standards (WebM).
     - **GIFs are first converted to a series of transparent RGBA PNGs.**
+    - Uses a greedy search optimization strategy to fit 64KB.
     """
     print(f"\nProcessing {input_path.name}...")
-    
-    current_input_for_webm = input_path
-    
+
     with tempfile.TemporaryDirectory() as temp_dir_str:
         temp_dir_for_png_frames = Path(temp_dir_str)
 
-        if is_gif(input_path):
-            print(f"Detected GIF. Extracting frames to PNG sequence for robust transparency (RGBA encoding)...")
+        try:
+            # Extract RGBA frames from input (Max Quality, Max 512px, Full FPS)
+            base_fps = extract_rgba_frames_from_video(input_path, temp_dir_for_png_frames, max_duration_sec=2.84)
             
-            # This is the step you requested: encoding the GIF to a series of RGBA frames.
-            png_sequence_path = temp_dir_for_png_frames / "frame%04d.png"
-            png_command = [
-                "ffmpeg",
-                "-i", str(input_path),
-                "-pix_fmt", "rgba", # Ensures alpha channel is explicitly mapped for PNG output
-                "-y",
-                str(png_sequence_path)
-            ]
-            try:
-                subprocess.run(png_command, check=True, capture_output=True)
-                # The input for the next step is now the PNG sequence pattern
-                current_input_for_webm = png_sequence_path 
-                print(f"Successfully extracted frames to {current_input_for_webm}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error extracting GIF frames for {input_path.name}: {e.stderr.decode()}")
+            # Count actual frames extracted
+            all_frames = sorted(list(temp_dir_for_png_frames.glob("*.png")))
+            total_frames = len(all_frames)
+            if total_frames == 0:
+                print("No frames extracted.")
                 return None
+                
+            with Image.open(all_frames[0]) as first_img:
+                base_width, base_height = first_img.size
 
-        # Convert to intermediate WebM, trim, and initial scale
-        intermediate_webm_path = output_dir / f"{input_path.stem}_intermediate.webm"
-        try:
-            # Pass the input_path or the PNG sequence path
-            current_processed_path = convert_to_webm_intermediate(current_input_for_webm, intermediate_webm_path, max_duration_sec=2.84)
         except Exception as e:
-            print(f"Failed to convert to intermediate WebM and trim {input_path.name}: {e}")
+            print(f"Error during frame extraction for {input_path.name}: {e}")
             return None
-        
-        # Optimize size and ensure transparency
+
         final_output_path = output_dir / f"{input_path.stem}.webm"
-        try:
-            final_output_path = optimize_webm_size(current_processed_path, final_output_path)
-            # Clean up intermediate file if it was modified and is not the final output
-            if final_output_path != current_processed_path and current_processed_path.exists():
-                current_processed_path.unlink()
-        except Exception as e:
-            print(f"Failed to optimize size for {input_path.name}: {e}")
-            if current_processed_path.exists(): current_processed_path.unlink()
-            return None
+        target_size_kb = 64
+        target_size_bytes = target_size_kb * 1024
         
-        print(f"Successfully converted {input_path.name} to {final_output_path.name} ({os.path.getsize(final_output_path) / 1024:.2f}KB)")
-        return final_output_path
+        candidates = get_optimization_candidates(base_fps)
+        
+        best_effort_path = None
+        best_effort_size = float('inf')
+        
+        # Temp output file
+        temp_output_path = output_dir / f"{input_path.stem}_temp_opt.webm"
+        
+        print(f"Starting optimization search for {input_path.name} (Target: {target_size_kb}KB)...")
+        print(f"Base: {base_width}x{base_height} @ {base_fps:.2f}fps. {len(candidates)} configurations generated.")
+
+        i = 0
+        while i < len(candidates):
+            config = candidates[i]
+            
+            # Prepare Parameters
+            scale = config["scale"]
+            crf = config["crf"]
+            fps_div = config["fps_div"]
+            
+            target_width = int(base_width * scale)
+            target_height = int(base_height * scale)
+            # Ensure even dims
+            target_width = max(2, target_width if target_width % 2 == 0 else target_width - 1)
+            target_height = max(2, target_height if target_height % 2 == 0 else target_height - 1)
+            
+            target_fps = base_fps / fps_div
+            
+            # Frame Indices (Subsampling)
+            # np.linspace-like selection
+            if fps_div == 1.0:
+                frame_indices = None # All frames
+            else:
+                # Select frames to approximate new FPS
+                # We simply skip frames.
+                # If div is 2.0, take 0, 2, 4...
+                # Ideally we distribute them evenly.
+                count_needed = int(total_frames / fps_div)
+                if count_needed < 1: count_needed = 1
+                frame_indices = [int(j * fps_div) for j in range(count_needed)]
+                # Clamp
+                frame_indices = [idx for idx in frame_indices if idx < total_frames]
+
+            # description_str = f"Scale={scale:.2f} ({target_width}x{target_height}), CRF={crf}, FPS={target_fps:.1f} (Div {fps_div})"
+            # print(f"Checking [{i}/{len(candidates)}]: {description_str} ...", end="", flush=True)
+            
+            try:
+                processed_path = encode_with_alpha_muxing(
+                    frames_dir=temp_dir_for_png_frames,
+                    output_path=temp_output_path,
+                    fps=target_fps,
+                    crf=crf,
+                    target_size=(target_width, target_height),
+                    frame_indices=frame_indices
+                )
+                
+                size = os.path.getsize(processed_path)
+                # print(f" Size: {size/1024:.2f}KB")
+                
+                if size <= target_size_bytes:
+                    print(f"Success! Optimized {input_path.name} to {size/1024:.2f}KB with Scale={scale:.2f}, CRF={crf}, FPS={target_fps:.1f}")
+                    shutil.move(processed_path, final_output_path)
+                    return final_output_path
+                
+                if size < best_effort_size:
+                    best_effort_size = size
+                    # Keep a copy? No, we reuse the path. 
+                    # We should maintain a separate "best effort" file if we want to fallback.
+                    best_effort_file = output_dir / f"{input_path.stem}_best_effort.webm"
+                    shutil.copy(processed_path, best_effort_file)
+                    best_effort_path = best_effort_file
+
+                # Greedy Step:
+                # If we are significantly over (e.g. 150KB vs 64KB), the current score resulted in ~2.3x overage.
+                # We need to drop quality significantly.
+                # Assume Size is somewhat proportional to Score (it's not linear, but Score correlates).
+                # NewScoreTarget = CurrentScore / (size / target_size_bytes)
+                
+                ratio = size / target_size_bytes
+                if ratio > 1.1:
+                    current_score = config["score"]
+                    target_score_est = current_score / (ratio ** 0.8) # Damping factor
+                    
+                    # Find next candidate with score <= target_score_est
+                    next_i = i + 1
+                    while next_i < len(candidates) and candidates[next_i]["score"] > target_score_est:
+                        next_i += 1
+                    
+                    if next_i > i + 1:
+                        # print(f"  -> Skipping {next_i - i - 1} configs (Ratio {ratio:.2f}). Jumping to item {next_i}.")
+                        i = next_i
+                    else:
+                        i += 1
+                else:
+                    i += 1
+
+            except Exception as e:
+                print(f"Error optimizing {input_path.name}: {e}")
+                i += 1
+        
+        # End of loop
+        if best_effort_path and best_effort_path.exists():
+            print(f"Could not meet target size for {input_path.name}. Best effort is {best_effort_size / 1024:.2f}KB.")
+            shutil.move(best_effort_path, final_output_path)
+            return final_output_path
+        
+        print(f"Failed to optimize {input_path.name}. Returning None.")
+        return None
 
 
 def main():
@@ -339,33 +371,28 @@ def main():
     base_path = Path(args.path).resolve()
     dirs = setup_directories(base_path)
 
-    if not check_ffmpeg_installed():
-        return
-
     print(f"Monitoring input directories: {dirs['input_moving']} and {dirs['input_static']}")
     print(f"Outputting to: {dirs['output_webm']} and {dirs['output_static']}")
     print(f"Archiving to: {dirs['archive_webm']} and {dirs['archive_static']}")
 
     input_dirs = [dirs["input_moving"], dirs["input_static"]]
     output_webm_dir = dirs["output_webm"] 
-    archive_webm_dir = dirs["archive_webm"] 
-    archive_gif_dir = dirs["archive_gif"]
+    archive_webm_dir = dirs["archive_webm"]
 
     for input_dir in input_dirs:
         print(f"\nScanning {input_dir} for GIFs/Videos...")
         for media_file in input_dir.iterdir():
-            if media_file.is_file() and is_gif_or_video(media_file):
-                try:
-                    converted_path = convert_to_telegram_sticker(media_file, output_webm_dir) 
-                    if converted_path:
-                        target_archive_dir = archive_gif_dir if is_gif(media_file) else archive_webm_dir
-                        print(f"Moving original {media_file.name} to {target_archive_dir}")
-                        shutil.move(str(media_file), str(target_archive_dir / media_file.name))
-                except Exception as e:
-                    print(f"Error processing {media_file.name}: {e}")
-            elif media_file.is_file():
-                print(f"Skipping non-GIF/video file: {media_file.name}")
-
+            if media_file.is_file():
+                mime_type = magic.from_file(media_file, mime=True)
+                if mime_type.startswith('video/') or mime_type in ['image/gif', 'image/webp']:
+                    output_file = convert_to_telegram_sticker(media_file, output_webm_dir)
+                    if output_file:
+                        shutil.move(media_file, archive_webm_dir / media_file.name)
+                        print(f"Archived {media_file.name} to {archive_webm_dir}")
+                    else:
+                        print(f"Failed to convert {media_file.name}. Keeping in input directory.")
+                else:
+                    print(f"Skipping unsupported file: {media_file.name} (MIME type: {mime_type})")
 
 if __name__ == "__main__":
     main()

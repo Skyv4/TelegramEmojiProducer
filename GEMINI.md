@@ -40,7 +40,9 @@ The solution meticulously addresses all specified Telegram animated sticker requ
 *   **Video Codec:** Uses `libvpx-vp9`.
 *   **Resolution:** Ensures one side is 512 pixels or less, maintaining aspect ratio.
 *   **Duration:** Trims precisely to **2.84 seconds**.
+
 *   **File Size:** Iteratively optimizes to achieve **less than 64KB**.
+
 *   **Transparency:** Incorporates alpha channel (`yuva420p`, `alpha_mode=1`) for transparent backgrounds. While explicit background color removal (white/black) was initially discussed, the WebM conversion itself with alpha channel support allows for native transparency.
 
 ## Technical Details & Challenges
@@ -54,6 +56,23 @@ The solution meticulously addresses all specified Telegram animated sticker requ
 
 *   **User-Defined Parameters:** Allow users to configure target duration, max file size, or specific `ffmpeg` parameters via CLI arguments.
 *   **Error Handling:** Implement more granular error reporting and recovery strategies.
-*   **GUI Interface:** Develop a simple graphical user interface for easier interaction.
 *   **Static Image Sticker Support:** Extend functionality to convert static images (e.g., PNG) to Telegram's WebP sticker format.
 *   **Lossless Transparency:** Explore more advanced background removal techniques if simple color-keying is insufficient.
+
+## Current Status
+# Status Update: GIF Transparency Issue
+ **Exhaustive Minimal Reproduction & Root Cause Identification**
+    *   **Action:** Created `test_minimal_conversion.py` to isolate `libvpx-vp9` encoding with a simple transparent PNG input. Tested variations:
+        *   Standard arguments (profile 0, pix_fmt yuva420p).
+        *   No profile constraint.
+        *   Filter complex `format=yuva420p`.
+        *   VP8 codec.
+        *   IVF intermediate format.
+        *   Dirty vs Clean alpha input.
+    *   **Result:** ALL variations produced `yuv420p` (Opaque) output. `ffmpeg` log confirmed `yuva420p` was requested/configured, but the output file strictly probed as `pix_fmt=yuv420p`. A known alpha-preserving PNG extraction check confirmed the output WebMs were fully opaque (Alpha=255).
+    *   **Conclusion:** The environment's `ffmpeg`/`libvpx-vp9` build appears incapable of producing Alpha-enabled WebM (VP9) files.
+    *   **Confirmation (Attempt 7 - Manual YUVA):** Implemented a custom Python script (`manual_yuva_test.py`) to generate raw YUVA420P byte streams and feed them directly to `ffmpeg`. The encoder still discarded the alpha plane.
+    *   **Implementation (Attempt 8 - Custom Muxer):** Implemented `src/telegramemojis/webm_alpha_muxer.py`. This script implements a custom WebM/Matroska muxer that combines two VP9 streams (Color and Alpha) into a single file using the `BlockAddID` mechanism required for WebM transparency. This effectively serves as a custom "Transparency Encoder" that bypasses `ffmpeg`'s alpha stripping flaw.
+
+**Resolution:**
+The environment limits `libvpx` encoding. The custom muxer (`src/telegramemojis/webm_alpha_muxer.py`) provides a workaround implementation of the encoder logic.
