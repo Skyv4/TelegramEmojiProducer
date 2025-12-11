@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import tempfile 
 import magic 
+import struct
 try:
     from .custom_encoder import encode_with_alpha_muxing
 except ImportError:
@@ -32,6 +33,31 @@ def setup_directories(base_path: Path):
 import av
 from PIL import Image
 
+def resize_to_square(img: Image.Image, target_size: int = 100) -> Image.Image:
+    """Resizes and pads an image to fit exactly within a square canvas."""
+    width, height = img.size
+    
+    # Calculate scale to fit largest dimension
+    scale = target_size / max(width, height)
+    
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    
+    # Resize if necessary
+    if scale != 1.0:
+        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+    # Create transparent square canvas
+    new_img = Image.new("RGBA", (target_size, target_size), (0, 0, 0, 0))
+    
+    # Center
+    x_offset = (target_size - new_width) // 2
+    y_offset = (target_size - new_height) // 2
+    
+    new_img.paste(img, (x_offset, y_offset))
+    return new_img
+
+
 def get_video_info(file_path: Path):
     """Gets duration, dimensions, and framerate using PyAV."""
     try:
@@ -58,6 +84,38 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
     trims to max_duration_sec, and rescales.
     Returns the framerate.
     """
+    
+    def get_webp_durations(file_path):
+        """Manually parse WebP ANMF chunks to get durations in ms."""
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+
+            if data[0:4] != b'RIFF': return []
+            pos = 12
+            frame_durations = []
+            
+            while pos < len(data):
+                chunk_id = data[pos:pos+4].decode('ascii', errors='ignore')
+                try:
+                    chunk_size = struct.unpack('<I', data[pos+4:pos+8])[0]
+                except: break
+                pos += 8
+                
+                if chunk_id == 'ANMF':
+                    # ANMF Duration is at content offset 12 (3 bytes, LE)
+                    # 3x4 bytes for X,Y,W,H = 12 bytes
+                    if pos + 15 <= len(data):
+                        dur_bytes = data[pos+12 : pos+15]
+                        duration = dur_bytes[0] | (dur_bytes[1] << 8) | (dur_bytes[2] << 16)
+                        frame_durations.append(duration)
+                    
+                pos += chunk_size
+                if chunk_size % 2 != 0: pos += 1
+            return frame_durations
+        except:
+             return []
+
     print(f"Extracting frames from {input_path.name}...")
     
     mime_type = magic.from_file(str(input_path), mime=True)
@@ -83,40 +141,58 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
                 pass
                 
                 
-                # Recalculate dims
-                telegram_max_dim = 100
-                if max(width, height) <= telegram_max_dim:
-                    scaled_width, scaled_height = width, height
-                elif width >= height:
-                    scaled_width = telegram_max_dim
-                    scaled_height = int(height * (telegram_max_dim / width))
-                else:
-                    scaled_height = telegram_max_dim
-                    scaled_width = int(width * (telegram_max_dim / height))
-                
-                scaled_width = scaled_width if scaled_width % 2 == 0 else scaled_width - 1
-                scaled_height = scaled_height if scaled_height % 2 == 0 else scaled_height - 1
-
                 frame_count = 0
-                max_frames = int(max_duration_sec * fps) # limit frames
+                
+                # Resampling Logic (Variable Duration -> Constant 30 FPS)
+                target_fps = 30.0
+                target_frame_duration_ms = 1000.0 / target_fps
+                max_frames = int(max_duration_sec * target_fps)
+                
+                durations = []
+                if mime_type == 'image/webp':
+                     durations = get_webp_durations(str(input_path))
+                     
+                accumulated_time_ms = 0.0
+                next_target_time_ms = 0.0
+                
+                print(f"Resampling to {target_fps} FPS. Manual Durations found: {len(durations)}")
                 
                 for i in range(img.n_frames):
                     if frame_count >= max_frames:
                         break
                         
                     img.seek(i)
-                    frame = img.convert("RGBA")
                     
-                     # Resize
-                    if (scaled_width, scaled_height) != frame.size:
-                        frame = frame.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+                    # Determine duration of THIS source frame
+                    # Priority: 1. Manual WebP Parser 2. Pillow Info 3. Default (100ms)
+                    frame_dur_ms = 100.0 # Default fallback
+                    if i < len(durations):
+                        frame_dur_ms = float(durations[i])
+                    elif 'duration' in img.info and img.info['duration'] > 0:
+                         frame_dur_ms = float(img.info['duration'])
+                         
+                    frame_end_time_ms = accumulated_time_ms + frame_dur_ms
                     
-                    out_name = output_frames_dir / f"frame{frame_count:04d}.png"
-                    frame.save(out_name)
-                    frame_count += 1
+                    # Lazy load frame
+                    frame = None 
                     
-                print(f"Extracted {frame_count} frames from animated image using PIL to {output_frames_dir}")
-                return fps
+                    while next_target_time_ms < frame_end_time_ms:
+                         if frame_count >= max_frames: break
+                         
+                         if frame is None:
+                             # Convert and Force 100x100 Square
+                             raw_frame = img.convert("RGBA")
+                             frame = resize_to_square(raw_frame, 100)
+                         
+                         out_name = output_frames_dir / f"frame{frame_count:04d}.png"
+                         frame.save(out_name)
+                         frame_count += 1
+                         next_target_time_ms += target_frame_duration_ms
+                    
+                    accumulated_time_ms = frame_end_time_ms
+                    
+                print(f"Extracted {frame_count} frames (resampled to {target_fps} FPS) from animated image using PIL to {output_frames_dir}")
+                return target_fps
 
         except Exception as e:
              print(f"Error extracting animated image with PIL: {e}. Falling back to PyAV...")
@@ -124,21 +200,6 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
 
     # PyAV Path (Videos or fallback)
     duration, width, height, fps = get_video_info(input_path)
-    
-    # Calculate new dimensions
-    telegram_max_dim = 100 
-    if max(width, height) <= telegram_max_dim:
-        scaled_width, scaled_height = width, height
-    elif width >= height:
-        scaled_width = telegram_max_dim
-        scaled_height = int(height * (telegram_max_dim / width))
-    else:
-        scaled_height = telegram_max_dim
-        scaled_width = int(width * (telegram_max_dim / height))
-    
-    # Ensure even dimensions
-    scaled_width = scaled_width if scaled_width % 2 == 0 else scaled_width - 1
-    scaled_height = scaled_height if scaled_height % 2 == 0 else scaled_height - 1
     
     # Fallback FPS if detection failed or is weird
     if fps <= 0 or fps > 120: fps = 30.0
@@ -159,9 +220,8 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
                 # layout="rgba" ensures we get alpha if present (e.g. gif)
                 img = frame.to_image().convert("RGBA")
                 
-                # Resize
-                if (scaled_width, scaled_height) != img.size:
-                    img = img.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+                # Resize to Square
+                img = resize_to_square(img, 100)
                 
                 out_name = output_frames_dir / f"frame{frame_count:04d}.png"
                 img.save(out_name)
