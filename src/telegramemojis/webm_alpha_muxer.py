@@ -27,20 +27,25 @@ EBML_ID_TAGS = 0x1254C367
 # --- Utils ---
 def encode_vint(num):
     if num < 0: raise ValueError("VINT must be positive")
+    
     length = 1
-    mask = 0x80
-    limit = 0x7F
-    while num > limit:
+    limit = 127
+    while num >= limit and length < 8:
         length += 1
-        mask >>= 1
-        limit = (limit << 8) | 0xFF
-    val = num | (mask << (8 * (length - 1)))
-    try:
-        return val.to_bytes(length, 'big')
-    except OverflowError:
-        # Fallback for large numbers if logic slightly off or strict sizing needed
-        # But for valid VINT limits this should hold.
-        raise ValueError(f"Could not encode VINT: {num}")
+        limit = (1 << (7 * length)) - 1
+        
+    if num > limit:
+        raise ValueError(f"Value {num} exceeds VINT capacity")
+    
+    marker = 1 << (7 * length + (8 - length) - 1) # This is getting complicated logic-wise due to bit position
+    # Simpler:
+    # Marker is 0x80 at first byte, shifted right by (length-1)
+    marker_byte = 0x80 >> (length - 1)
+    # Shift to position at top of VINT
+    marker_val = marker_byte << (8 * (length - 1))
+    
+    val = num | marker_val
+    return val.to_bytes(length, 'big')
 
 def read_vint(stream):
     start_byte = stream.read(1)
@@ -178,15 +183,25 @@ def extract_alpha_frames(alpha_elements):
         
     return frames
 
+EBML_ID_TIMECODE = 0xE7
+EBML_ID_REFERENCEBLOCK = 0xFB
+
 def inject_alpha_into_color(color_elements, alpha_frames):
     
     alpha_ptr = 0
+    # Track the absolute timecode of the PREVIOUS frame encountered
+    last_absolute_timecode = 0
     
+    # helper to read integer from bytes
+    def read_uint(data):
+        return int.from_bytes(data, 'big')
+
     def traverse_modify(el):
         nonlocal alpha_ptr
+        nonlocal last_absolute_timecode
         
         if el.eid == EBML_ID_SEGMENT:
-             # Filter out SeekHead, Cues, Void, Tags from Segment children to avoid offset issues
+             # Filter out SeekHead, Cues, Void, Tags from Segment children
              el.children = [c for c in el.children if c.eid not in (EBML_ID_SEEKHEAD, EBML_ID_CUES, EBML_ID_VOID, EBML_ID_TAGS)]
 
         # 1. Modify Tracks -> TrackEntry -> Video to add AlphaMode
@@ -198,19 +213,23 @@ def inject_alpha_into_color(color_elements, alpha_frames):
             
             if not has_alpha:
                 el.children.append(EbmlElement(EBML_ID_ALPHAMODE, payload=(1).to_bytes(1, 'big')))
-                # Sort? usually not strictly required but Element order is defined. 
-                # AlphaMode (53C0) usually after PixelCrop or DisplayWidth. 
-                # Appending at end is usually safer for readers than inserting random spots.
         
         # 2. Modify Cluster -> SimpleBlock to BlockGroup
         if el.eid == EBML_ID_CLUSTER:
+            # Get Cluster Timecode
+            cluster_timecode = 0
+            for c in el.children:
+                if c.eid == EBML_ID_TIMECODE:
+                    cluster_timecode = read_uint(c.payload)
+                    break
+            
             new_children = []
             for c in el.children:
                 if c.eid == EBML_ID_SIMPLEBLOCK:
                     # Convert to BlockGroup
                     if alpha_ptr >= len(alpha_frames):
-                        print("Warning: Not enough alpha frames")
-                        new_children.append(c) # Keep as is?
+                        # print("Warning: Not enough alpha frames")
+                        new_children.append(c) 
                         continue
                         
                     alpha_data = alpha_frames[alpha_ptr]
@@ -219,27 +238,24 @@ def inject_alpha_into_color(color_elements, alpha_frames):
                     # Parse SimpleBlock
                     sb = BytesIO(c.payload)
                     tn_val, tn_len = read_vint(sb)
-                    # We need the bytes of TN to re-write exactly or re-encode
-                    # Let's just re-encode
-                    timecode = sb.read(2)
+                    
+                    # Timecode (int16 signed)
+                    tc_bytes = sb.read(2)
+                    timecode_val = int.from_bytes(tc_bytes, 'big', signed=True) # it is signed int16 relative to cluster
+                    
                     flags_byte = sb.read(1)
                     flags = flags_byte[0]
                     frame_data = sb.read()
                     
-                    # Construct Block Payload
-                    # Block is same Header structure
-                    # Mask out 0x80 (Keyframe) from Flags?
-                    # "The BlockGroup element is the container for a Block... Keyframe is NOT in Block flags" (actually it says "Same as SimpleBlock" but usually KF is inferred). 
-                    # Let's keep flags identical for now. VP9 codec private data inside bitstream defines KF too.
-                    # Actually, if we use BlockGroup, we usually want explicit Block frame.
+                    current_absolute_timecode = cluster_timecode + timecode_val
                     
+                    # Construct Block Payload
                     blk_stream = BytesIO()
                     blk_stream.write(encode_vint(tn_val))
-                    blk_stream.write(timecode)
+                    blk_stream.write(tc_bytes)
                     
-                    # Fix Flags: SimpleBlock uses Bit 7 for Keyframe (0x80). 
-                    # Block (inside BlockGroup) strictly reserves Bit 7 (must be 0).
-                    # Keyframe status in BlockGroup is inferred (No ReferenceBlock = Keyframe).
+                    # Check Keyframe
+                    is_keyframe = (flags & 0x80) == 0x80
                     
                     clean_flags = flags & 0x7F # Mask off 0x80
                     blk_stream.write(clean_flags.to_bytes(1, 'big'))
@@ -255,19 +271,43 @@ def inject_alpha_into_color(color_elements, alpha_frames):
                     block_more = EbmlElement(EBML_ID_BLOCKMORE, children=[block_add_id, block_addition])
                     block_additions = EbmlElement(EBML_ID_BLOCKADDITIONS, children=[block_more])
                     
-                    # BlockGroup
-                    bg = EbmlElement(EBML_ID_BLOCKGROUP, children=[block_elem, block_additions])
+                    block_group_children = [block_elem, block_additions]
                     
-                    # ReferenceBlock?
-                    # If it was not a keyframe (SimpleBlock Flag & 0x80 == 0), we *should* have a ReferenceBlock.
-                    # But finding the correct ReferenceBlock timecode relative offset is hard without full parsing.
-                    # SimpleBlock handles this implicitly. BlockGroup requires explicit ReferenceBlock for non-keyframes in standard Matroska?
-                    # WebM spec: "SimpleBlock... combines BlockGroup+Block". 
-                    # If we revert to BlockGroup, we might be violating the "Must contain ReferenceBlock for non-keyframes" rule if we don't add it.
-                    # However, typical VP9 in WebM often relies on invisible superframes / codec internal refs.
-                    # Let's try WITHOUT ReferenceBlock first. If playback fails, we know why.
+                    # Add ReferenceBlock if NOT keyframe
+                    if not is_keyframe:
+                        # Reference is relative to the current block's timecode
+                        # e.g. ref_time = last_time
+                        # offset = ref_time - current_time
+                        # This should be negative.
+                        offset = last_absolute_timecode - current_absolute_timecode
+                        
+                        # ReferenceBlock is Signed Integer (VINT-encoded? No, usually standard signed integer element, but wait...)
+                        # Spec: "ReferenceBlock... Signed Integer". 
+                        # In EBML, Signed Integer is variable length.
+                        # We need to encode a signed integer. My EbmlElement writes raw payload.
+                        # I need a helper for signed integer to bytes.
+                        def int_to_sbytes(n):
+                            length = (n.bit_length() + 8) // 8
+                            if length == 0: length = 1
+                            # For negative numbers, bit_length is of abs value? No.
+                            # Just use to_bytes with signed=True and enough length
+                            # -33 needs 1 byte (signed)
+                            # -200 needs 2 bytes
+                            try:
+                                return n.to_bytes(length, 'big', signed=True)
+                            except OverflowError:
+                                return n.to_bytes(length+1, 'big', signed=True)
+
+                        # We usually want minimal length
+                        ref_payload = int_to_sbytes(offset)
+                        block_group_children.append(EbmlElement(EBML_ID_REFERENCEBLOCK, payload=ref_payload))
                     
+                    bg = EbmlElement(EBML_ID_BLOCKGROUP, children=block_group_children)
                     new_children.append(bg)
+                    
+                    # Update info
+                    last_absolute_timecode = current_absolute_timecode
+
                 else:
                     new_children.append(c)
             el.children = new_children
