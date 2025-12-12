@@ -35,6 +35,7 @@ The Telegram Animated Sticker Converter has been successfully refactored to a **
 
 ## Current status
 *   **Working:** The pipeline is fully functional and verified.
-*   **Input:** Supports GIFs and WebPs (with full transparency) and video files.
-*   **Output:** Generates compliant `.webm` files with `AlphaMode` metadata.
+*   **Input (Animated):** Supports GIFs and WebPs (with full transparency) and video files -> WebM/VP9.
+*   **Input (Static):** Supports WebP/Images -> WebP (100x100).
+*   **Output:** Generates compliant `.webm` (animated) and `.webp` (static) files.
 *   **Usage:** Run via `uv run python src/telegramemojis/main.py`.

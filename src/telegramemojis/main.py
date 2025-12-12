@@ -418,6 +418,25 @@ def convert_to_telegram_sticker(input_path: Path, output_dir: Path) -> Path:
         return None
 
 
+def convert_to_static_sticker(input_path: Path, output_dir: Path) -> Path:
+    """
+    Converts a static image to a 100x100 WebP sticker.
+    """
+    print(f"\nProcessing Static {input_path.name}...")
+    try:
+        with Image.open(input_path) as img:
+            # Resize
+            img = img.convert("RGBA")
+            final_img = resize_to_square(img, 100)
+            
+            output_path = output_dir / f"{input_path.stem}.webp"
+            final_img.save(output_path, format="WEBP", lossless=True)
+            print(f"Saved static sticker to {output_path}")
+            return output_path
+    except Exception as e:
+        print(f"Error converting static image {input_path.name}: {e}")
+        return None
+
 def main():
     parser = argparse.ArgumentParser(description="Convert GIFs/Videos to Telegram sticker standards.")
     parser.add_argument(
@@ -435,24 +454,41 @@ def main():
     print(f"Outputting to: {dirs['output_webm']} and {dirs['output_static']}")
     print(f"Archiving to: {dirs['archive_webm']} and {dirs['archive_static']}")
 
-    input_dirs = [dirs["input_moving"], dirs["input_static"]]
-    output_webm_dir = dirs["output_webm"] 
-    archive_webm_dir = dirs["archive_webm"]
-
-    for input_dir in input_dirs:
-        print(f"\nScanning {input_dir} for GIFs/Videos...")
-        for media_file in input_dir.iterdir():
-            if media_file.is_file():
+    # --- Process Moving (Animated) ---
+    input_moving = dirs["input_moving"]
+    if input_moving.exists():
+        print(f"\nScanning {input_moving} for Moving Content (GIF/Video)...")
+        for media_file in input_moving.iterdir():
+            if media_file.is_file() and not media_file.name.startswith('.'):
                 mime_type = magic.from_file(media_file, mime=True)
                 if mime_type.startswith('video/') or mime_type in ['image/gif', 'image/webp']:
-                    output_file = convert_to_telegram_sticker(media_file, output_webm_dir)
+                    output_file = convert_to_telegram_sticker(media_file, dirs["output_webm"])
                     if output_file:
-                        shutil.move(media_file, archive_webm_dir / media_file.name)
-                        print(f"Archived {media_file.name} to {archive_webm_dir}")
+                        shutil.move(media_file, dirs["archive_webm"] / media_file.name)
+                        print(f"Archived {media_file.name} to {dirs['archive_webm']}")
                     else:
                         print(f"Failed to convert {media_file.name}. Keeping in input directory.")
                 else:
-                    print(f"Skipping unsupported file: {media_file.name} (MIME type: {mime_type})")
+                    print(f"Skipping unsupported moving file: {media_file.name} (MIME type: {mime_type})")
+
+    # --- Process Static ---
+    input_static = dirs["input_static"]
+    if input_static.exists():
+        print(f"\nScanning {input_static} for Static Content (WebP/Images)...")
+        for media_file in input_static.iterdir():
+             if media_file.is_file() and not media_file.name.startswith('.'):
+                # We accept mostly anything Pillow can open, but user specifically asked for WebP->WebP.
+                # Generic image check is better.
+                mime_type = magic.from_file(media_file, mime=True)
+                if mime_type.startswith('image/'):
+                     output_file = convert_to_static_sticker(media_file, dirs["output_static"])
+                     if output_file:
+                         shutil.move(media_file, dirs["archive_static"] / media_file.name)
+                         print(f"Archived {media_file.name} to {dirs['archive_static']}")
+                     else:
+                         print(f"Failed to convert {media_file.name}.")
+                else:
+                    print(f"Skipping unsupported static file: {media_file.name} (MIME type: {mime_type})")
 
 if __name__ == "__main__":
     main()
