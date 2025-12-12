@@ -151,6 +151,19 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
                 durations = []
                 if mime_type == 'image/webp':
                      durations = get_webp_durations(str(input_path))
+                
+                # Auto-retiming: If total duration > max_duration, speed up to fit.
+                speed_factor = 1.0
+                if durations:
+                    total_duration_ms = sum(durations)
+                    limit_ms = max_duration_sec * 1000.0
+                    
+                    # Add a small buffer tolerance (e.g. if it's 2.85s, maybe don't squash it? 
+                    # But 2.84 is already a safe limit for 3.0s. Let's strictly adhere to it.)
+                    if total_duration_ms > limit_ms:
+                        speed_factor = limit_ms / total_duration_ms
+                        print(f"Video duration ({total_duration_ms}ms) exceeds limit ({limit_ms}ms). Retiming by factor {speed_factor:.4f} to fit.")
+
                      
                 accumulated_time_ms = 0.0
                 next_target_time_ms = 0.0
@@ -170,6 +183,8 @@ def extract_rgba_frames_from_video(input_path: Path, output_frames_dir: Path, ma
                         frame_dur_ms = float(durations[i])
                     elif 'duration' in img.info and img.info['duration'] > 0:
                          frame_dur_ms = float(img.info['duration'])
+                         
+                    frame_dur_ms *= speed_factor
                          
                     frame_end_time_ms = accumulated_time_ms + frame_dur_ms
                     
